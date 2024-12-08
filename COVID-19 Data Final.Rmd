@@ -1,0 +1,240 @@
+---
+title: "COVID-19 Final"
+author: "L. Himmelspach"
+date: "2024-12-08"
+output: html_document
+---
+
+In this analysis, I am starting by reading the data in from the url.
+Two questions of interest to explore from this data are: Are there significant differences in the number of cases per capita by state and by country? Also how did the number of deaths per each case fluctuate in time?
+The datasets are from Johns Hopkins University via Github, on https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv.
+Each dataset is a time series data, tracking the number of cases and deaths both in the US and globally. They include the location of the data, number of cases, and population of each point.
+
+```{r}
+# Install the tidyverse, ggplot2, dplyr, lubridate, forecast, and plotly packages if not already installed
+if(!require("tidyverse")){
+  install.packages("tidyverse")
+}
+if(!require("ggplot2")){
+  install.packages("ggplot2")
+}
+if(!require("dplyr")){
+  install.packages("dplyr")
+}
+if(!require("lubridate")){
+  install.packages("lubridate")
+}
+if(!require("forecast")){
+  install.packages("forecast")
+}
+if(!require("plotly")){
+  install.packages("plotly")
+}
+
+# Load the packages
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(forecast)
+library(plotly)
+```
+
+```{r get_jhu_data}
+## Get current Data in the four files
+# They all begin the same way
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <- c("time_series_covid19_confirmed_US.csv", "time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_US.csv", "time_series_covid19_deaths_global.csv")
+
+urls <- str_c(url_in,file_names)
+
+```
+
+Let's read in the data and see what we have.
+
+```{r import_data, message = FALSE}
+
+US_cases <- read.csv(urls[1])
+global_cases <- read.csv(urls[2])
+US_deaths <- read.csv(urls[3])
+global_deaths <- read.csv(urls[4])
+
+
+```
+
+To tidy the data, I'm going to start by renaming the global cases and deaths country/region and province/state information so it is more friendly in R.
+
+```{r tidy_data}
+
+# Rename columns for better readability
+global_cases <- rename(global_cases, Country_Region = Country.Region, Province_State = Province.State)
+global_deaths <- rename(global_deaths, Country_Region = Country.Region, Province_State = Province.State)
+                       
+# Remove unnecessary columns
+global_cases <- global_cases %>% select(-Lat, -Long)
+global_deaths <- global_deaths %>% select(-Lat, -Long)
+
+
+```
+
+Next, I'll reshape the data so that each date will be a separate row instead of each date being a column. Then I'll have to modify the date to be readable in R, and join the two global datasets together so each point has both cases and deaths per day. I'll also get rid of any points that don't have any cases.
+
+```{r reshape_data}
+
+# Reshape the data to have each date as a separate row
+global_cases_long <- global_cases %>% pivot_longer(cols = -c(Country_Region, Province_State), names_to = "date", values_to = "cases")
+
+global_deaths_long <- global_deaths %>% pivot_longer(cols = -c(Country_Region, Province_State), names_to = "date", values_to = "deaths")
+
+# Modify date to be R readable
+global_deaths_long$date <- mdy(gsub("X","",global_deaths_long$date))
+global_cases_long$date <- mdy(gsub("X","",global_cases_long$date))
+
+# Join the two global datasets
+global <- global_cases_long %>% full_join(global_deaths_long)
+
+# Get rid of points with no data
+global <- global %>% filter(cases >0)
+```
+I'll start tidying the US data by removing several unnecessary columns, and reshaping the data like I did for the global datasets so each date is its own row. Again, make the dates readable in R and join the cases and deaths sets to make one set. Remove the datapoints with no cases. 
+
+```{r tidy_us}
+# Remove unnecessary columns
+US_cases <- US_cases %>% select(-UID,-iso2,-iso3,-code3,-FIPS,-Lat, -Long_)
+US_deaths <- US_deaths %>% select(-UID,-iso2,-iso3,-code3,-FIPS,-Lat, -Long_)
+
+# Reshape the data so each date has separate row
+US_cases_long <- US_cases %>% pivot_longer(cols = -c(Admin2,Province_State,Country_Region,Combined_Key), names_to = "date", values_to = "cases")
+US_deaths_long <- US_deaths %>% pivot_longer(cols = -c(Admin2,Province_State,Country_Region,Combined_Key,Population), names_to = "date", values_to = "deaths")
+
+# Make dates R readable
+US_cases_long$date <- mdy(gsub("X","",US_cases_long$date))
+US_deaths_long$date <- mdy(gsub("X","",US_deaths_long$date))
+
+# Join cases and deaths for US and remove points without data
+US <- US_cases_long %>% full_join(US_deaths_long)
+US <- US %>% filter(cases > 0)
+
+```
+Population data is available for the USA but not fed in automatically for the global datasets, so I'll feed that information in, which is also from Johns Hopkins via Github.
+
+```{r global_pop_data}
+
+global <- global %>% unite("Combined_Key", c(Province_State, Country_Region), sep = ",", na.rm = TRUE, remove = FALSE)
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+uid <- read.csv(uid_lookup_url) %>% select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+global <- global %>% left_join(uid, by = c("Province_State", "Country_Region")) %>% select(-c(UID, FIPS)) %>% select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+```
+
+To see the differences in cases per capita, I'll group each point by the Province/State and use the summed points to calculate the cases per capita.
+
+```{r group_data}
+# Group by state and sum cases and population
+state_summary <- US %>% group_by(Province_State) %>% summarize(
+  total_cases = sum(cases),
+  total_population = sum(Population)
+)
+
+# Calculate cases per capita
+
+state_summary <- state_summary %>% mutate(cases_per_capita = total_cases/total_population)
+
+```
+ 
+Now, create a histogram to visualize each point in cases per capita by state.
+
+```{r us_states_per_capita}
+
+# Create a visualization by making a histogram of cases per capita by state
+ggplot(state_summary %>% filter(Province_State != "Diamond Princess" & Province_State != "Grand Princess"), aes(x = reorder(Province_State, cases_per_capita),y = cases_per_capita)) + geom_bar(stat = "identity", fill = "green") + labs(x = "State", y = "Cases per Capita", title = "Cases per Capita by State") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# A couple of points called "Diamond Princess" and "Grand Princess" looked like they were outliers so I removed those
+
+```
+
+There is a wide range in the number of cases per capita across states. Utah has about 3 times more per capita than the lowest reported results in island territories such as American Samoa and Northern Mariana Islands. The chart shows cases in total per capita, and does not include information on population density.
+
+Now start grouping each country together and sum cases and population to find the cases per capita in each country.
+
+```{r}
+# Group by country and sum cases and population
+country_summary <- global %>% group_by(Country_Region) %>% summarize(
+  total_global_cases = sum(cases),
+  total_global_population = sum(Population)
+)
+
+# Calculate cases per capita in each country
+
+country_summary <- country_summary %>% mutate(cases_per_capita = total_global_cases/total_global_population)
+
+
+```
+
+Create the histogram for cases per capita for each country.
+
+```{r global_cases_per_capita}
+
+# Create a visualization by making a histogram of cases per capita by country
+ggplot(country_summary, aes(x = reorder(Country_Region, cases_per_capita),y = cases_per_capita)) + geom_bar(stat = "identity", fill = "blue") + labs(x = "Country", y = "Cases per Capita", title = "Cases per Capita by Country") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+There were 7 countries that had no population data, so they were automatically excluded. There is a wide range with several countries reporting close to 0 cases per capita. Some amount of bias could be expected, as there could be different reporting methods used across each country.
+
+I'll now create a time series model to show the total cases by date. I'll use that to forecast an estimate number of cases for the next year of data (2024).
+
+```{r time_series_model}
+
+# Group the data by date and sum the cases
+US_aggregated <- US %>% group_by(date) %>% summarize(total_cases = sum(cases))
+
+# Create a time series object
+ts_data <- ts(US_aggregated$total_cases, start = c(min(year(US$date)),min(month(US$date))), end = c(max(year(US$date)),(max(month(US$date)))), frequency = 12)
+
+
+# Visualize the time series
+autoplot(ts_data, main = "Time Series of COVID-19 Cases", xlab = "Date", ylab = "Total Cases")
+
+
+# Difference the data
+ts_data_diff <- diff(ts_data, differences = 1)
+
+# Fit and ARIMA model
+model <- auto.arima(ts_data_diff)
+
+# Forecast future values for 12 months
+forecast <- forecast(model, h = 12)
+
+# Plot the forecast
+autoplot(forecast, main = "Forecast of COVID-19 Cases", xlab = "Date", ylab = "Total Cases")
+
+```
+
+The first time series model shows a consistent exponential rise in the total cases. The forecast shows a very wide range of potential case numbers, indicating a high degree of uncertainty and a wide range of possible outcomes. The overall trend appears to be increasing, with a sharp spike in cases in 2023. 
+
+To answer the second question on how the deaths per case fluctuated through time, I'll group the global data by date and calculate the deaths per case and plot that via plotly.
+
+```{r deaths_per_case_by_date}
+
+# Group data by date and calculate total cases and deaths
+data_grouped <- global %>% group_by(date) %>% summarize(total_cases = sum(cases), total_deaths = sum(deaths))
+
+# Calculate deaths per case
+data_grouped$deaths_per_case <- data_grouped$total_deaths / data_grouped$total_cases
+
+# Create scatter plot with plotly
+plot_ly(data_grouped, x = ~date, y = ~deaths_per_case, type = 'scatter', mode = 'markers', marker = list(size = 10, color = 'steelblue')) %>% layout(title = 'Combined Deaths per Case by Date', xaxis = list(title = 'Date'), yaxis = list(title = 'Deaths per Case'))
+
+```
+
+This data shows worldwide how many deaths there were per case. It shows a sharp decline in deaths per case from late 2020 to early 2021. This could be attributed to factors such as the rollout of vaccines or possibly increased knowledge about the virus, and improved treatment methods. The decline fluctuates slightly after 2021. This could possibly be due to  new variants, restrictions being lifted, or a variety of other factors. 
+
+In conclusion, there was a wide range of COVID-19 cases per capita across the United States, with Utah reporting the highest rate, and territories American Samoa and Northern Mariana Islands having the lowest. These areas having the lowest rates could be due to their ability to restrict access to visitors or some other factors. Population density may have played a role in some of the differences in each state, but total population of the case numbers is what is represented, not including population density. 
+Globally there was even higher degree of range of cases per capita when comparing countries. This could have been due to a number of factors, such as differences in regulations or requirements in each country. It could have also been a result of differences in reporting of each country. 
+The model showed a forecast with a very wide confidence interval, likely due to volatility of the available data and limited amount of data sample size, only having about 3 years of data on file, which does not give significant insight to how cases will increase or decrease year to year.
+The visualization that showed the total worldwide deaths per case over time was interesting, and there was a well defined increase initially followed by a sharp decrease in late 2020. This is likely a result again of rollout of vaccines and better understanding of the virus. The fluctuation after 2020 could be associated to a number of factors, such as new variants of the virus, or changing rules and regulations around the virus.
